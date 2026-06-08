@@ -1,0 +1,47 @@
+module FAULT(busd,busq,cntr);
+inout busd,busq;
+input cntr;
+
+electrical busd,busq,cntr;
+
+parameter real   RFAULT = 100;
+parameter string COMMAND = "";
+
+integer Flag;
+real RetCode;
+
+//control function integer[] CntrFault;
+control function real CntrFault;
+endfunction
+
+analog begin
+
+    @(initial_model) Flag = 0;
+    @(initial_step)  Flag = 0;
+
+    if( analysis( "tran" ) )
+    {
+//	@(cross(v(cntr) - 0.5, +1,1m))
+	@(above(v(cntr) - 0.4, 1m))
+	    Flag = 1;
+
+	if( Flag == 1 )
+	{
+//	    @(cross(v(cntr) - 0.5, -1,1m)) 
+	    @(above(0.6 - v(cntr), 1m)) 
+	    {
+		Flag = 2;
+		$cntrevaluate(COMMAND);
+	    }
+	}
+    }
+
+    if( 1 == Flag )
+    {
+        i(busd) <+ v(busd) / RFAULT;
+        i(busq) <+ v(busq) / RFAULT;
+    }
+
+end
+
+endmodule

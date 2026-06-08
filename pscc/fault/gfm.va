@@ -1,0 +1,318 @@
+module GFM(vr,vi,dcp,dcn,eta,coi);
+input vr,vi,eta,coi;
+output dcp,dcn;
+electrical vr,vi,eta,coi,dcp,dcn;
+electrical theta_pll,vqhat,w_pll,x1,w_vsm,theta_vsm,qhat,eps1,eps2;
+electrical phid,phiq,gamma1,gamma2;
+electrical dcv,qcv,idcv,iqcv,ido,iqo;
+electrical ilim1, ilim2, ilim3;
+
+electrical id, iq;
+
+parameter real OMEGA_LP = 500;
+parameter real KP_PLL   = 10;
+parameter real KI_PLL   = 30;
+parameter real OMEGA_B  = 2*pi*50;
+parameter real VG       = 69k;
+parameter real TA       = 5;
+parameter real KD       = 5;
+parameter real KW       = 200  from (1m:inf);
+parameter real W_REF    = 1;
+parameter real P_REF    = 0;
+parameter real PG       = 1;
+parameter real QG       = 0;
+parameter real OMEGA_F  = 1000;
+parameter real KQ       = 3m;
+parameter real KV       = 3.0;
+parameter real RV       = 0.1m from [0:inf);
+parameter real LV       = 0    from [0:inf);
+parameter real KPV      = 2*100;
+parameter real KIV      = 100;
+parameter real CF       = 0.074;
+parameter real LF       = 0.08;
+parameter real RF       = 0.003;
+parameter integer KFFI  = 1    from [0:1];
+parameter real W_AD     = 50;
+parameter real KAD      = 0.5;
+parameter real KPC      = 0.1*100;
+parameter real KIC      = 10*100;
+parameter integer KFFV  = 1    from [0:1];
+parameter real KILP     = 3    from (0:inf); // Integral coefficient of the current limiter regulator
+parameter real KILI     = 10   from [0:inf); // Integral coefficient of the current limiter regulator
+parameter real TFIL     = 20m  from [0:inf); // Time constant of the current limiter low-pass filter
+parameter real I_LIMIT  = 1k   from [0:inf); // Maximum allower converter current
+parameter integer SLACK = 0    from [0:1];   // Slack/non-slack grid forming inverter
+parameter integer PV    = 0    from [0:1];   // PV/no-PV grid forming inverter
+
+real Vo, Vd, Vq, P, Q, Wpll, Vss, Vds, Vqs, Idcvs, Iqcvs;
+real Vdads, Vqads, Vdcvs, Vqcvs; 
+real Vssd, Vssq; 
+real Vref, Qref;
+real Pgen, AbsCur;
+integer Swc;
+
+// LC filter with parsitics and Grid/Vsc current sensing.
+// Current are measured with the non-normal convention.
+
+GFM_FILTER #(.OMEGA_B(OMEGA_B), .VG(VG),.P_REF(P_REF),.CF(CF),.LF(LF),.RF(RF)) F1 
+    (vr,vi, dcv,qcv, ido,iqo, idcv,iqcv);
+
+// Virtual synchronous generator.
+
+analog begin
+
+    if( analysis("dcinit") ) begin
+
+	v(vr) <+ 1.1*VG;
+	v(vi) <+ 0.1*VG;
+
+    end else if( analysis("dc") ) begin
+        if( 0 != SLACK ) begin
+	    i(id) <+ v(vr) - VG;
+	    i(iq) <+ v(vi);
+
+	    Pgen = (v(vr)*v(ido) + v(vi)*v(iqo))/P_REF;
+        end else begin
+	    if( 0 != PV ) 
+	    {
+		i(id) <+ v(vr)*v(vr)  + v(vi)*v(vi)  - VG*VG;
+		i(iq) <+ v(vr)*v(ido) + v(vi)*v(iqo) - PG*P_REF;
+	    }
+	    else
+	    {
+		P = v(vr)*v(ido) + v(vi)*v(iqo);
+		Q = v(vi)*v(ido) - v(vr)*v(iqo);
+
+		i(id) <+ Q - QG*P_REF;
+		i(iq) <+ P - PG*P_REF;
+	    }
+        end
+
+	v(dcv) <+ v(id);
+	v(qcv) <+ v(iq);
+
+	v(vqhat)     <+ 0.0;
+        v(theta_pll) <+ atan2( v(vi), v(vr) );
+	v(w_pll)     <+ 0;
+	v(x1)        <+ 0;
+
+// Current control
+        v(gamma1) <+ (v(dcv) + LF*(VG*VG)/P_REF*OMEGA_B*v(iqcv) - KFFV*v(vr)) / (KIC*(VG*VG)/P_REF);
+        v(gamma2) <+ (v(qcv) - LF*(VG*VG)/P_REF*OMEGA_B*v(idcv) - KFFV*v(vi)) / (KIC*(VG*VG)/P_REF);
+
+// Active damping
+        v(phid) <+ v(vr);
+        v(phiq) <+ v(vi);
+
+// Voltage control
+        v(eps1) <+ (v(idcv) + CF*P_REF/(VG*VG)*OMEGA_B*v(vi) - KFFI*v(ido)) / (KIV*P_REF/(VG*VG));
+        v(eps2) <+ (v(iqcv) - CF*P_REF/(VG*VG)*OMEGA_B*v(vr) - KFFI*v(iqo)) / (KIV*P_REF/(VG*VG));
+
+// Virtual impedance
+	Vssd = v(vr) + RV*(VG*VG)/P_REF*OMEGA_B*v(ido) - LV*(VG*VG)/P_REF*OMEGA_B*v(iqo);
+	Vssq = v(vi) + RV*(VG*VG)/P_REF*OMEGA_B*v(iqo) + LV*(VG*VG)/P_REF*OMEGA_B*v(ido);
+
+	Vref = sqrt( Vssd*Vssd + Vssq*Vssq );
+
+// Reactive power control
+        if( 0 != SLACK ) 
+	{
+            Qref = VG * VG;
+            v(qhat)  <+ Qref;
+	}
+        else
+            if( 0 != PV )
+                v(qhat) <+ VG;
+            else begin
+                Qref = v(vi)*v(ido) - v(vr)*v(iqo);
+	        v(qhat)  <+ Qref;
+	    end
+
+	v(ilim1) <+ 1;
+	v(ilim3) <+ Qref;
+
+	v(w_vsm)     <+ W_REF;
+	v(theta_vsm) <+ atan2( Vssq, Vssd );
+
+	P = v(vr)*v(ido) + v(vi)*v(iqo);
+
+	i(dcp,dcn) <+ -P / max(1,v(dcp,dcn));
+
+    end else begin
+// ----------------------------------------------------------------------
+//                                PLL
+// ----------------------------------------------------------------------
+// 'w_pll' is the angular frequency of the electrical voltage at the bus
+// estimated  by the PLL.
+	Vd = v(vr)*cos(v(theta_pll)) + v(vi)*sin(v(theta_pll));
+	Vq = v(vi)*cos(v(theta_pll)) - v(vr)*sin(v(theta_pll));
+	Vo = sqrt( Vd*Vd + Vq*Vq );
+
+	v(x1)        <+ OMEGA_LP * (Vq / max(0.5*VG,Vo) - v(vqhat));
+	i(vqhat)     <+ ddt(v(vqhat)) - v(x1);
+	i(w_pll)     <+ ddt(v(w_pll)) - KP_PLL * v(x1)  - KI_PLL * v(vqhat);
+	i(theta_pll) <+ ddt(v(theta_pll)) - v(w_pll) * OMEGA_B;
+
+	Wpll = v(w_pll) + W_REF;
+
+// ----------------------------------------------------------------------
+//                            SWING EQUATION
+// ----------------------------------------------------------------------
+        if( 0 == SLACK ) 
+	    Pgen = PG;
+
+	P = v(vr)*v(ido) + v(vi)*v(iqo);
+
+	i(w_vsm)     <+ P_REF*TA * ddt(v(w_vsm)) - 
+	    ((1+v(eta))*(Pgen*P_REF - P) - P_REF*KD*(v(w_vsm) - Wpll) - 
+	    P_REF*KW*(v(w_vsm) - W_REF));
+//	i(theta_vsm) <+ ddt(v(theta_vsm)) - OMEGA_B * (v(w_vsm) - W_REF);
+	i(theta_vsm) <+ ddt(v(theta_vsm)) - OMEGA_B * (v(w_vsm) - v(coi));
+
+// ----------------------------------------------------------------------
+//                        REACTIVE/VOLTAGE POWER CONTROL
+// ----------------------------------------------------------------------
+        if( 0 != SLACK )
+        {
+            Q = v(vr)*v(vr) + v(vi)*v(vi);   // Voltage controll
+            i(qhat) <+ ddt(v(qhat)) + OMEGA_F * (v(qhat) - Q);
+	    Vss = Vref + KQ*(v(ilim3) - v(qhat));
+        }
+        else
+            if( 0 != PV )
+	    {
+	        i(qhat) <+ ddt(v(qhat)) + OMEGA_F * (v(qhat) - Vo);
+	        Vss = Vref + KV*(VG - v(qhat));
+	    }
+            else begin
+                Q = v(vi)*v(ido) - v(vr)*v(iqo); // Reactive power control
+	        i(qhat) <+ ddt(v(qhat)) + OMEGA_F * (v(qhat) - Q);
+	        Vss = Vref + KQ*(v(ilim3) - v(qhat));
+            end
+
+// ----------------------------------------------------------------------
+//                           VIRTUAL IMPEDANCE
+// ----------------------------------------------------------------------
+	Vds = Vss*cos(v(theta_vsm)) - RV*(VG*VG)/P_REF*OMEGA_B*v(ido) + 
+	      LV*(VG*VG)/P_REF*OMEGA_B*v(w_vsm)*v(iqo);
+	Vqs = Vss*sin(v(theta_vsm)) - RV*(VG*VG)/P_REF*OMEGA_B*v(iqo) - 
+	      LV*(VG*VG)/P_REF*OMEGA_B*v(w_vsm)*v(ido);
+
+// ----------------------------------------------------------------------
+//                           VOLTAGE CONTROL
+// ----------------------------------------------------------------------
+        i(eps1) <+ ddt(v(eps1)) - Vds + v(vr);
+        i(eps2) <+ ddt(v(eps2)) - Vqs + v(vi);
+        Idcvs = P_REF/(VG*VG)*(KPV*(Vds - v(vr)) + KIV*v(eps1) - CF*OMEGA_B*v(w_vsm)*v(vi)) + 
+	        KFFI*v(ido);
+        Iqcvs = P_REF/(VG*VG)*(KPV*(Vqs - v(vi)) + KIV*v(eps2) + CF*OMEGA_B*v(w_vsm)*v(vr)) + 
+	        KFFI*v(iqo);
+
+// ----------------------------------------------------------------------
+//                           ACTIVE DAMPING
+// ----------------------------------------------------------------------
+        i(phid) <+ ddt(v(phid)) + v(phid) - v(vr);
+        i(phiq) <+ ddt(v(phiq)) + v(phiq) - v(vi);
+	Vdads = KAD*(v(vr) - v(phid));
+	Vqads = KAD*(v(vi) - v(phiq));
+
+// ----------------------------------------------------------------------
+//                           CURRENT CONTROL
+// ----------------------------------------------------------------------
+        i(gamma1) <+ ddt(v(gamma1)) + v(idcv) - Idcvs;
+        i(gamma2) <+ ddt(v(gamma2)) + v(iqcv) - Iqcvs;
+	Vdcvs = (VG*VG)/P_REF*(KPC*(Idcvs - v(idcv)) + KIC*v(gamma1) - LF*OMEGA_B*v(w_vsm)*v(iqcv)) +
+	        KFFV*v(vr) - Vdads;
+	Vqcvs = (VG*VG)/P_REF*(KPC*(Iqcvs - v(iqcv)) + KIC*v(gamma2) + LF*OMEGA_B*v(w_vsm)*v(idcv)) +
+	        KFFV*v(vi) - Vqads;
+
+// ----------------------------------------------------------------------
+//                           CURRENT LIMITER
+// ----------------------------------------------------------------------
+        AbsCur = sqrt( i(dcv) * i(dcv) + i(qcv) * i(qcv) ) / I_LIMIT;
+
+	if( AbsCur >= 1 + 0.02 ) Swc = 1; // Switching has some hysteresis
+	if( AbsCur <= 1 - 0.02 ) Swc = 0;
+
+	i(ilim1) <+ 20m*ddt( v(ilim1) ) + v(ilim1) - max( 0, (1 - max( 0, KILP*(AbsCur - 1) ) )); // Low pass filter
+	i(ilim2) <+ ddt( v(ilim2) ) + (Swc ? 1k : 1u)*v(ilim2) - 
+	            (Swc ? (v(ilim1) - 1) : 0 );             // Integrator with anti-windup and reset
+	v(ilim3) <+ Qref * (v(ilim1) + KILI/KILP*v(ilim2));  // Add the proportional and integral contributions
+
+// ----------------------------------------------------------------------
+//                           AC BUS DRIVER
+// ----------------------------------------------------------------------
+	v(dcv) <+ Vdcvs;
+	v(qcv) <+ Vqcvs;
+
+// ----------------------------------------------------------------------
+//                           DC BUS DRIVER
+// ----------------------------------------------------------------------
+	i(dcp,dcn) <+ -(v(dcv)*v(idcv) + v(qcv)*v(iqcv)) / max(1,v(dcp,dcn));
+
+	v(id) <+ 0;
+	v(iq) <+ 0;
+
+    end
+
+end
+
+endmodule
+
+// LC filter with parsitics and Grid/Vsc current sensing.
+
+module GFM_FILTER(vr,vi, dcv,qcv, ido,iqo, idcv,iqcv);
+inout vr,vi;
+inout dcv,qcv;
+output ido,iqo;
+output idcv,iqcv;
+
+electrical vr,vi,dcv,qcv,ido,iqo,idcv,iqcv;
+electrical d10, q10, d20, q20;  // Auxiliary nodes used in the filter.
+
+parameter real OMEGA_B  = 2*pi*50;
+parameter real VG       = 69k;
+parameter real P_REF    = 0;
+parameter real CF       = 0.074;
+parameter real LF       = 0.08;
+parameter real RF       = 0.003;
+
+analog begin
+
+// Current are measured with the non-normal convention.
+
+    v(ido)  <+ -i(vr,d10);
+    v(iqo)  <+ -i(vi,q10);
+    v(idcv) <+ -i(d20,dcv);
+    v(iqcv) <+ -i(q20,qcv);
+
+    v(vr,d10)  <+ 0;
+    v(vi,q10)  <+ 0;
+    v(d20,dcv) <+ 0;
+    v(q20,qcv) <+ 0;
+
+`ifdef DYN
+
+// Dynamic electrical filter
+
+    i(d10)  <+ CF*P_REF/(VG*VG) * (-OMEGA_B*v(q10) + ddt(v(d10)));
+    i(q10)  <+ CF*P_REF/(VG*VG) * ( OMEGA_B*v(d10) + ddt(v(q10)));
+
+    v(d10,d20) <+ (VG*VG)/P_REF * (-OMEGA_B * LF * i(q10,q20) + RF * i(d10,d20) + LF * ddt(i(d10,d20)));
+    v(q10,q20) <+ (VG*VG)/P_REF * ( OMEGA_B * LF * i(d10,d20) + RF * i(q10,q20) + LF * ddt(i(q10,q20)));
+
+`else
+
+// Non-dynamic electrical filter
+
+    i(d10)  <+ CF*P_REF/(VG*VG) * (-OMEGA_B*v(q10));
+    i(q10)  <+ CF*P_REF/(VG*VG) * ( OMEGA_B*v(d10));
+
+    v(d10,d20) <+ (VG*VG)/P_REF * (-OMEGA_B * LF * i(q10,q20) + RF * i(d10,d20));
+    v(q10,q20) <+ (VG*VG)/P_REF * ( OMEGA_B * LF * i(d10,d20) + RF * i(q10,q20));
+
+`endif
+
+end
+
+endmodule
